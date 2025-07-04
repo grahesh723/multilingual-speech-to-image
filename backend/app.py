@@ -32,12 +32,6 @@ MODEL_PATHS = {
 IMAGES_DIR = os.path.join("backend", "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
-# Remove preloading at startup
-# PRELOADED_MODELS = {
-#     "dreamshaper": model_loader.load_model("dreamshaper"),
-#     "realistic_vision": model_loader.load_model("realistic_vision")
-# }
-
 # Model cache for lazy loading
 MODEL_CACHE = {}
 
