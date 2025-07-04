@@ -1,0 +1,7 @@
+flask
+flask-cors
+SpeechRecognition
+pydub
+openai-whisper
+torch 
+transformers 
