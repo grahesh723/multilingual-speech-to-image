@@ -4,4 +4,6 @@ SpeechRecognition
 pydub
 openai-whisper
 torch 
-transformers 
+transformers
+psutil
+python-dotenv 
