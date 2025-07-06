@@ -1,29 +1,22 @@
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, send_file
 from flask_cors import CORS
-import whisper
-from pydub import AudioSegment
-import io
 import os
-import gc
-import threading
 import time
 import logging
 import re
 from datetime import datetime, timedelta
-from diffusers import StableDiffusionPipeline
-import torch
-import whisper
-import model_loader
 import psutil
 import glob
 from config import *
+from speech_service import SpeechService
+from image_service import ImageService
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backend/app.log'),
+        logging.FileHandler('app.log'),
         logging.StreamHandler()
     ]
 )
@@ -32,31 +25,27 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+# Initialize services
+speech_service = SpeechService()
+image_service = ImageService()
+
 # Rate limiting
 REQUEST_COUNTS = {}
 RATE_LIMIT_WINDOW = 60  # 1 minute
 MAX_REQUESTS_PER_WINDOW = 10
-
-# Model cache for lazy loading with memory management
-MODEL_CACHE = {}
-MODEL_LAST_USED = {}
-
-# Request queue to prevent multiple simultaneous generations
-GENERATION_LOCK = threading.Lock()
-IS_GENERATING = False
 
 # Create images directory
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 def setup_logging():
     """Setup logging configuration"""
-    if not os.path.exists('backend/logs'):
-        os.makedirs('backend/logs')
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
     
     # Rotating file handler
     from logging.handlers import RotatingFileHandler
     file_handler = RotatingFileHandler(
-        'backend/logs/app.log', 
+        'logs/app.log', 
         maxBytes=1024*1024,  # 1MB
         backupCount=5
     )
@@ -89,8 +78,73 @@ def sanitize_prompt(prompt):
     
     return prompt.strip()
 
+@app.route('/transcribe-audio', methods=['POST'])
+def transcribe_audio():
+    """Transcribe uploaded audio file to text"""
+    try:
+        # Check rate limit
+        client_ip = request.remote_addr
+        if not check_rate_limit(client_ip):
+            return jsonify({
+                "success": False,
+                "error": "Rate limit exceeded. Please wait before making another request."
+            }), 429
+        
+        # Check if audio file is present
+        if 'audio' not in request.files:
+            return jsonify({
+                "success": False,
+                "error": "No audio file provided"
+            }), 400
+        
+        audio_file = request.files['audio']
+        
+        # Validate file
+        if audio_file.filename == '':
+            return jsonify({
+                "success": False,
+                "error": "No file selected"
+            }), 400
+        
+        # Read audio data
+        audio_data = audio_file.read()
+        
+        # Validate audio data
+        if not speech_service.validate_audio(audio_data):
+            return jsonify({
+                "success": False,
+                "error": "Invalid audio file or file too large"
+            }), 400
+        
+        # Get file extension
+        file_extension = audio_file.filename.rsplit('.', 1)[1].lower() if '.' in audio_file.filename else 'wav'
+        
+        # Process audio
+        result = speech_service.process_audio(audio_data, file_extension)
+        
+        if result["success"]:
+            return jsonify({
+                "success": True,
+                "text": result["text"],
+                "confidence": result["confidence"],
+                "language": result["language"]
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get("error", "Failed to transcribe audio")
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error in transcribe_audio: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Internal server error"
+        }), 500
+
 def check_rate_limit(client_ip):
     """Check if client has exceeded rate limit"""
+    global REQUEST_COUNTS
     current_time = time.time()
     
     # Clean old entries
@@ -104,274 +158,143 @@ def check_rate_limit(client_ip):
     REQUEST_COUNTS[client_ip] = current_time
     return True
 
-def get_memory_usage():
-    """Get current memory usage in MB"""
-    try:
-        process = psutil.Process()
-        return process.memory_info().rss / 1024 / 1024
-    except Exception as e:
-        logger.error(f"Error getting memory usage: {e}")
-        return 0
-
-def cleanup_old_images():
-    """Remove old generated images to save disk space"""
-    try:
-        image_files = glob.glob(os.path.join(IMAGES_DIR, "generated_*.png"))
-        if len(image_files) > MAX_IMAGES_TO_KEEP:
-            # Sort by modification time (oldest first)
-            image_files.sort(key=os.path.getmtime)
-            # Remove oldest files
-            for old_file in image_files[:-MAX_IMAGES_TO_KEEP]:
-                os.remove(old_file)
-                logger.info(f"Removed old image: {os.path.basename(old_file)}")
-    except Exception as e:
-        logger.error(f"Error during image cleanup: {e}")
-
-def unload_unused_models():
-    """Unload models that haven't been used recently"""
-    current_time = time.time()
-    models_to_unload = []
-    
-    for style, last_used in MODEL_LAST_USED.items():
-        if current_time - last_used > MODEL_TIMEOUT:
-            models_to_unload.append(style)
-    
-    for style in models_to_unload:
-        if style in MODEL_CACHE:
-            logger.info(f"Unloading unused model: {style}")
-            del MODEL_CACHE[style]
-            del MODEL_LAST_USED[style]
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-def detect_visual_style(prompt):
-    """Enhanced style detection with better scoring"""
-    prompt_lower = prompt.lower()
-    dreamshaper_score = 0
-    realistic_score = 0
-    found_dreamshaper = []
-    found_realistic = []
-    
-    # Check for dreamshaper keywords
-    for keyword, score in DREAMSHAPER_KEYWORDS.items():
-        if keyword in prompt_lower:
-            dreamshaper_score += score
-            found_dreamshaper.append(f"{keyword} (+{score})")
-    
-    # Check for realistic keywords
-    for keyword, score in REALISTIC_KEYWORDS.items():
-        if keyword in prompt_lower:
-            realistic_score += score
-            found_realistic.append(f"{keyword} (+{score})")
-    
-    # Determine style with confidence
-    if dreamshaper_score > realistic_score:
-        return ("dreamshaper", "Lykon/dreamshaper-8", dreamshaper_score, realistic_score, found_dreamshaper, found_realistic)
-    else:
-        return ("realistic_vision", "SG161222/Realistic_Vision_V5.1_noVAE", dreamshaper_score, realistic_score, found_dreamshaper, found_realistic)
-
-def get_model(style):
-    """Get model with enhanced memory management"""
-    global MODEL_CACHE, MODEL_LAST_USED
-    
-    # Unload unused models first
-    unload_unused_models()
-    
-    # If we have too many models in memory, unload the least recently used
-    if len(MODEL_CACHE) >= MAX_MODELS_IN_MEMORY:
-        if style not in MODEL_CACHE:
-            # Find least recently used model
-            lru_style = min(MODEL_LAST_USED.keys(), key=lambda k: MODEL_LAST_USED[k])
-            logger.info(f"Unloading LRU model: {lru_style}")
-            del MODEL_CACHE[lru_style]
-            del MODEL_LAST_USED[lru_style]
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    
-    # Load model if not in cache
-    if style not in MODEL_CACHE:
-        logger.info(f"Loading model: {style}")
-        MODEL_CACHE[style] = model_loader.load_model(style)
-    
-    # Update last used time
-    MODEL_LAST_USED[style] = time.time()
-    
-    return MODEL_CACHE[style]
-
-def generate_image(prompt, style, images_dir):
-    """Generate image with enhanced error handling and optimization"""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    try:
-        pipe = get_model(style)
-        
-        logger.info(f"Generating image for prompt: {prompt[:50]}... using {style}")
-        logger.info(f"Memory usage before generation: {get_memory_usage():.1f} MB")
-        
-        # Use configuration settings
-        image = pipe(
-            prompt,
-            num_inference_steps=DEFAULT_INFERENCE_STEPS,
-            height=IMAGE_SIZE,
-            width=IMAGE_SIZE,
-            guidance_scale=DEFAULT_GUIDANCE_SCALE
-        ).images[0]
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"generated_{timestamp}.png"
-        image_path = os.path.join(images_dir, filename)
-        
-        # Save with optimization
-        image.save(image_path, optimize=True, quality=IMAGE_QUALITY)
-        
-        logger.info(f"Memory usage after generation: {get_memory_usage():.1f} MB")
-        logger.info(f"Image saved: {filename}")
-        
-        # Cleanup old images if enabled
-        if AUTO_CLEANUP_ENABLED:
-            cleanup_old_images()
-        
-        return image_path
-        
-    except Exception as e:
-        logger.error(f"Error generating image: {e}")
-        raise
+# Removed old functions - now handled by services
 
 @app.route('/generate-image', methods=['POST'])
 def generate_image_api():
-    """Enhanced image generation endpoint with validation and rate limiting"""
-    global IS_GENERATING
-    
-    # Get client IP for rate limiting
-    client_ip = request.remote_addr
-    
-    # Check rate limit
-    if not check_rate_limit(client_ip):
-        return jsonify({
-            'error': 'Rate limit exceeded. Please wait before making another request.'
-        }), 429
-    
-    # Check if already generating
-    if IS_GENERATING:
-        return jsonify({
-            'error': 'Another generation is in progress. Please wait.',
-            'estimated_wait_time': '30-60 seconds'
-        }), 429
-    
-    # Validate request
-    if not request.is_json:
-        return jsonify({'error': 'Content-Type must be application/json'}), 400
-    
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Invalid JSON data'}), 400
-    
-    prompt = data.get('prompt')
-    
-    # Validate prompt
+    """Generate image from text prompt"""
     try:
-        prompt = sanitize_prompt(prompt)
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    
-    # Check memory usage
-    memory_usage = get_memory_usage()
-    if memory_usage > MAX_MEMORY_USAGE_MB:
-        return jsonify({
-            'error': 'Server memory usage is high. Please try again later.',
-            'memory_usage_mb': memory_usage
-        }), 503
-    
-    with GENERATION_LOCK:
-        IS_GENERATING = True
-    
-    try:
-        # Enhanced style detection
-        style, model_name, ds_score, rv_score, ds_keywords, rv_keywords = detect_visual_style(prompt)
+        # Check rate limit
+        client_ip = request.remote_addr
+        if not check_rate_limit(client_ip):
+            return jsonify({
+                "success": False,
+                "error": "Rate limit exceeded. Please wait before making another request."
+            }), 429
         
-        # Generate image
-        image_path = generate_image(prompt, style, IMAGES_DIR)
-        filename = os.path.basename(image_path)
+
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No data provided"
+            }), 400
         
-        # Prepare response
-        response_data = {
-            'image_path': f'images/{filename}',
-            'selected_style': style,
-            'model_name': model_name,
-            'dreamshaper_score': ds_score,
-            'realistic_vision_score': rv_score,
-            'dreamshaper_keywords': ds_keywords,
-            'realistic_vision_keywords': rv_keywords,
-            'generation_time': datetime.now().isoformat(),
-            'prompt_length': len(prompt)
-        }
+        prompt = data.get('prompt', '').strip()
+        style = data.get('style')  # Optional, will auto-detect if not provided
         
-        # Add memory usage if enabled
-        if LOG_MEMORY_USAGE:
-            response_data['memory_usage_mb'] = get_memory_usage()
+        # Validate prompt
+        if not prompt:
+            return jsonify({
+                "success": False,
+                "error": "Prompt is required"
+            }), 400
         
-        logger.info(f"Successfully generated image: {filename}")
-        return jsonify(response_data), 200
+        try:
+            prompt = sanitize_prompt(prompt)
+        except ValueError as e:
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 400
         
+        # Check memory usage
+        memory_usage = image_service.get_memory_usage()
+        if memory_usage["cpu_memory_mb"] > MAX_MEMORY_USAGE_MB:
+            return jsonify({
+                "success": False,
+                "error": "Server is currently overloaded. Please try again later."
+            }), 503
+        
+        # Generate image using image service
+        result = image_service.generate_image(prompt, style, IMAGES_DIR)
+        
+        if result["success"]:
+            # Clean up old images
+            image_service.cleanup_old_images()
+            return jsonify({
+                "success": True,
+                "filename": result["filename"],
+                "image_url": f"/images/{result['filename']}",
+                "image_path": f"/images/{result['filename']}",  # For frontend compatibility
+                "prompt": result["prompt"],
+                "style": result["style"],
+                "metadata": result.get("metadata", {})
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get("error", "Failed to generate image")
+            }), 500
+            
     except Exception as e:
         logger.error(f"Error in generate_image_api: {e}")
         return jsonify({
-            'error': 'Internal server error during image generation',
-            'details': str(e) if DEBUG_MODE else 'Please try again later'
+            "success": False,
+            "error": "Internal server error"
         }), 500
-    finally:
-        with GENERATION_LOCK:
-            IS_GENERATING = False
 
 @app.route('/images/<filename>')
 def serve_image(filename):
     """Enhanced image serving with security checks"""
     # Validate filename
-    if not re.match(r'^generated_\d{8}_\d{6}\.png$', filename):
+    if not re.match(r'^generated_\d{8}_\d{6}(_[a-zA-Z0-9_]+)?\.png$', filename):
         return jsonify({'error': 'Invalid filename format'}), 400
-    
-    images_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'images'))
-    file_path = os.path.join(images_dir, filename)
-    
+    file_path = os.path.join(IMAGES_DIR, filename)
     # Security check - ensure file is within images directory
-    if not os.path.abspath(file_path).startswith(os.path.abspath(images_dir)):
+    if not os.path.abspath(file_path).startswith(os.path.abspath(IMAGES_DIR)):
         return jsonify({'error': 'Access denied'}), 403
-    
     if not os.path.exists(file_path):
         return jsonify({'error': 'Image not found'}), 404
-    
     logger.info(f"Serving image: {filename}")
-    return send_from_directory(images_dir, filename)
+    return send_from_directory(IMAGES_DIR, filename)
+
+@app.route('/download/<filename>')
+def download_image(filename):
+    """Force download of the image file with security checks"""
+    # Validate filename (allow underscores in style)
+    if not re.match(r'^generated_\d{8}_\d{6}(_[a-zA-Z0-9_]+)?\.png$', filename):
+        return jsonify({'error': 'Invalid filename format'}), 400
+    file_path = os.path.join(IMAGES_DIR, filename)
+    # Security check - ensure file is within images directory
+    if not os.path.abspath(file_path).startswith(os.path.abspath(IMAGES_DIR)):
+        return jsonify({'error': 'Access denied'}), 403
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'Image not found'}), 404
+    logger.info(f"Downloading image: {filename}")
+    return send_file(file_path, as_attachment=True)
 
 @app.route('/status', methods=['GET'])
 def get_status():
-    """Enhanced status endpoint with detailed information"""
+    """Get server status and system information"""
     try:
         # Get system information
         cpu_percent = psutil.cpu_percent(interval=1)
         memory = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
         
+        # Get memory usage from services
+        image_memory = image_service.get_memory_usage()
+        
         status_data = {
             'server_status': 'running',
             'timestamp': datetime.now().isoformat(),
-            'memory_usage_mb': get_memory_usage(),
+            'memory_usage_mb': image_memory["cpu_memory_mb"],
             'memory_percent': memory.percent,
             'cpu_percent': cpu_percent,
             'disk_percent': disk.percent,
-            'models_loaded': list(MODEL_CACHE.keys()),
-            'is_generating': IS_GENERATING,
+            'models_loaded': list(image_service.model_cache.keys()),
+            'is_generating': image_service.generation_lock,
             'images_count': len(glob.glob(os.path.join(IMAGES_DIR, "generated_*.png"))),
-            'uptime': time.time() - app.start_time if hasattr(app, 'start_time') else 0
+            'speech_model_loaded': speech_service.model_loaded,
+            'supported_audio_formats': speech_service.get_supported_formats()
         }
         
         # Add GPU information if available
-        if torch.cuda.is_available():
+        if image_memory["gpu_memory_mb"] > 0:
             status_data['gpu_available'] = True
-            status_data['gpu_memory_allocated_gb'] = torch.cuda.memory_allocated() / 1024**3
-            status_data['gpu_memory_reserved_gb'] = torch.cuda.memory_reserved() / 1024**3
+            status_data['gpu_memory_mb'] = image_memory["gpu_memory_mb"]
         else:
             status_data['gpu_available'] = False
         
@@ -383,22 +306,76 @@ def get_status():
 
 @app.route('/cleanup', methods=['POST'])
 def manual_cleanup():
-    """Enhanced manual cleanup endpoint"""
+    """Manual cleanup endpoint"""
+    try:
+        # Clean up old images
+        image_service.cleanup_old_images()
+        
+        # Unload unused models
+        image_service.unload_unused_models()
+        
+        return jsonify({
+            "success": True,
+            "message": "Cleanup completed successfully"
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in manual cleanup: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Error during cleanup"
+        }), 500
+
+@app.route('/images', methods=['GET'])
+def get_image_history():
+    """Get list of generated images"""
+    try:
+        image_files = []
+        for ext in ["*.png", "*.jpg", "*.jpeg"]:
+            image_files.extend(glob.glob(os.path.join(IMAGES_DIR, ext)))
+        
+        # Sort by modification time (newest first)
+        image_files.sort(key=os.path.getmtime, reverse=True)
+        
+        images = []
+        for filepath in image_files[:20]:  # Limit to 20 most recent
+            filename = os.path.basename(filepath)
+            stat = os.stat(filepath)
+            
+            images.append({
+                "filename": filename,
+                "url": f"/images/{filename}",
+                "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "size_bytes": stat.st_size
+            })
+        
+        return jsonify({
+            "success": True,
+            "images": images,
+            "total_count": len(image_files)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting image history: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Error retrieving image history"
+        }), 500
     try:
         logger.info("Manual cleanup initiated")
         
         # Cleanup images
-        cleanup_old_images()
+        image_service.cleanup_old_images()
         
         # Unload unused models
-        unload_unused_models()
+        image_service.unload_unused_models()
         
         # Force garbage collection
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        memory_after = get_memory_usage()
+        memory_after = image_service.get_memory_usage()
         
         logger.info(f"Manual cleanup completed. Memory usage: {memory_after:.1f} MB")
         

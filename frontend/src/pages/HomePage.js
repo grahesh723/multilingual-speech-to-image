@@ -1,13 +1,13 @@
 import React, { useState, useRef } from 'react';
 import { 
   Mic, MicOff, Upload, Download, Type, Image, Play, Pause, X, RefreshCw, 
-  Square, Settings, History, Crown, 
-  Palette, Sliders, Save, Share2, Key, 
+  Square, History, Crown, 
+  Palette, Save, Share2, Key, 
   Sparkles, Gem
 } from 'lucide-react';
 import { Header } from '../components/Header';
 import { AudioVisualizer } from '../components/AudioVisualizer';
-import { SettingsModal } from '../components/SettingsModal';
+
 import { HistoryModal } from '../components/HistoryModal';
 import { PricingModal } from '../components/PricingModal';
 import { useImageGeneration } from '../hooks/useImageGeneration';
@@ -31,14 +31,10 @@ export const HomePage = () => {
   const [transcribedText, setTranscribedText] = useState('');
   const [processingStage, setProcessingStage] = useState('');
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+
   const [showHistory, setShowHistory] = useState(false);
   const [showPricing, setShowPricing] = useState(false);
-  const [styleSettings, setStyleSettings] = useState({
-    imageStyle: 'realistic',
-    artStyle: 'classical',
-    quality: 'standard'
-  });
+
   const [imageHistory, setImageHistory] = useState([
     { id: 1, prompt: 'Renaissance portrait', image: 'https://images.unsplash.com/photo-1578662996442-48f60103fc96?w=200&h=200&fit=crop', created: '2 hours ago' },
     { id: 2, prompt: 'Baroque landscape', image: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=200&h=200&fit=crop', created: '1 day ago' },
@@ -169,10 +165,15 @@ export const HomePage = () => {
 
   const handleDownload = () => {
     if (generatedImage) {
+      // Use the new /download endpoint for forced download
       const link = document.createElement('a');
-      link.href = `${API_BASE}/${generatedImage.image_path}`;
-      link.download = 'generated-artwork.jpg';
+      // Extract just the filename from generatedImage.image_path
+      const filename = generatedImage.image_path.split('/').pop();
+      link.href = `${API_BASE}/download/${filename}`;
+      link.download = filename;
+      document.body.appendChild(link);
       link.click();
+      document.body.removeChild(link);
     }
   };
 
@@ -221,7 +222,6 @@ export const HomePage = () => {
         setShowUserMenu={setShowUserMenu}
         setShowHistory={setShowHistory}
         setShowPricing={setShowPricing}
-        setShowSettings={setShowSettings}
       />
 
       <div className="container mx-auto px-4 py-8">
@@ -419,33 +419,7 @@ export const HomePage = () => {
                 )}
               </div>
 
-              {/* Advanced Settings */}
-              <div className="bg-gradient-to-br from-stone-50 to-amber-50 rounded-2xl p-6 shadow-xl border border-amber-200">
-                <div className="flex items-center justify-between mb-4">
-                  <h4 className="text-lg font-medium text-stone-800">Style Settings</h4>
-                  <button 
-                    onClick={() => setShowSettings(true)}
-                    className="text-amber-600 hover:text-amber-800 transition-colors"
-                  >
-                    <Sliders className="w-5 h-5" />
-                  </button>
-                </div>
-                
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-stone-700 mb-1">Style</label>
-                    <div className="text-sm font-medium text-amber-700 bg-amber-100 px-3 py-1 rounded-lg">
-                      {styleSettings.imageStyle.charAt(0).toUpperCase() + styleSettings.imageStyle.slice(1)}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm text-stone-700 mb-1">Art Period</label>
-                    <div className="text-sm font-medium text-amber-700 bg-amber-100 px-3 py-1 rounded-lg">
-                      {styleSettings.artStyle.charAt(0).toUpperCase() + styleSettings.artStyle.slice(1)}
-                    </div>
-                  </div>
-                </div>
-              </div>
+
 
               {/* Processing Status */}
               {isGenerating && (
@@ -603,13 +577,7 @@ export const HomePage = () => {
                     <History className="w-5 h-5 text-amber-600" />
                     <span>View History</span>
                   </button>
-                  <button 
-                    onClick={() => setShowSettings(true)}
-                    className="w-full flex items-center gap-3 p-3 hover:bg-amber-100 rounded-lg text-stone-700 transition-colors"
-                  >
-                    <Settings className="w-5 h-5 text-amber-600" />
-                    <span>Style Settings</span>
-                  </button>
+
                   <button className="w-full flex items-center gap-3 p-3 hover:bg-amber-100 rounded-lg text-stone-700 transition-colors">
                     <Key className="w-5 h-5 text-amber-600" />
                     <span>API Access</span>
@@ -622,12 +590,6 @@ export const HomePage = () => {
       </div>
 
       {/* Modals */}
-      <SettingsModal
-        isOpen={showSettings}
-        onClose={() => setShowSettings(false)}
-        settings={styleSettings}
-        onSettingsChange={setStyleSettings}
-      />
       <HistoryModal
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}

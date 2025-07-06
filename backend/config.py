@@ -5,6 +5,9 @@ Adjust these values based on your system's capabilities
 
 import os
 
+# Get absolute path to the backend directory
+BACKEND_DIR = r"C:\D\project\Project\backend"
+
 # Memory Management Settings
 MAX_MODELS_IN_MEMORY = 1  # Number of models to keep in memory simultaneously
 MODEL_TIMEOUT = 300  # Seconds before unloading unused models (5 minutes)
@@ -24,19 +27,24 @@ CLEANUP_INTERVAL = 60  # Seconds between automatic cleanups
 AUTO_CLEANUP_ENABLED = True  # Enable automatic cleanup
 
 # Server Settings
-DEBUG_MODE = False  # Disable debug mode for production (reduces memory usage)
+DEBUG_MODE = True  # Enable debug mode for development (auto-reloads on code changes)
 THREADED = True  # Enable threading for concurrent requests
 HOST = '0.0.0.0'
 PORT = 5000
 
 # Model Paths
 MODEL_PATHS = {
-    "dreamshaper": os.path.join("backend", "models", "dreamshaper_model", "dreamshaper_model"),
-    "realistic_vision": os.path.join("backend", "models", "realistic_vision_model", "realistic_vision_model")
+    "dreamshaper": os.path.join(BACKEND_DIR, "models", "dreamshaper_model", "dreamshaper_model"),
+    "realistic_vision": os.path.join(BACKEND_DIR, "models", "realistic_vision_model", "realistic_vision_model")
 }
 
 # Directories
-IMAGES_DIR = os.path.join("backend", "images")
+IMAGES_DIR = os.path.join(BACKEND_DIR, "images")
+LOGS_DIR = os.path.join(BACKEND_DIR, "logs")
+OTHERS_DIR = os.path.join(BACKEND_DIR, "others")
+
+# Example for log file
+APP_LOG_PATH = os.path.join(LOGS_DIR, "app.log")
 
 # Performance Monitoring
 ENABLE_MEMORY_MONITORING = True  # Enable memory usage tracking

@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { 
-  Palette, Gem, History, ChevronDown, User, Settings, CreditCard 
+  Palette, Gem, History, ChevronDown, User, CreditCard 
 } from 'lucide-react';
 
 /**
@@ -11,7 +11,7 @@ import {
  * @param {Function} props.setShowUserMenu - Function to toggle user menu
  * @param {Function} props.setShowHistory - Function to show history modal
  * @param {Function} props.setShowPricing - Function to show pricing modal
- * @param {Function} props.setShowSettings - Function to show settings modal
+
  * @returns {JSX.Element} Header component
  */
 export const Header = ({
@@ -20,8 +20,26 @@ export const Header = ({
   setShowUserMenu,
   setShowHistory,
   setShowPricing,
-  setShowSettings,
 }) => {
+  const menuRef = useRef(null);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) {
+        setShowUserMenu(false);
+      }
+    };
+
+    if (showUserMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showUserMenu, setShowUserMenu]);
+
   const UserMenu = () => (
     <div className="absolute right-0 top-12 w-64 bg-gradient-to-b from-stone-50 to-amber-50 rounded-xl shadow-2xl border border-amber-200 p-4 z-50">
       <div className="flex items-center gap-3 mb-4 pb-4 border-b border-amber-200">
@@ -35,12 +53,7 @@ export const Header = ({
         <button className="w-full flex items-center gap-2 p-2 hover:bg-amber-100 rounded-lg text-stone-700 transition-colors">
           <User className="w-4 h-4" /> Profile
         </button>
-        <button 
-          onClick={() => setShowSettings(true)}
-          className="w-full flex items-center gap-2 p-2 hover:bg-amber-100 rounded-lg text-stone-700 transition-colors"
-        >
-          <Settings className="w-4 h-4" /> Settings
-        </button>
+
         <button 
           onClick={() => setShowPricing(true)}
           className="w-full flex items-center gap-2 p-2 hover:bg-amber-100 rounded-lg text-stone-700 transition-colors"
@@ -78,7 +91,7 @@ export const Header = ({
               <History className="w-5 h-5" />
             </button>
             
-            <div className="relative">
+            <div className="relative" ref={menuRef}>
               <button 
                 onClick={() => setShowUserMenu(!showUserMenu)}
                 className="flex items-center gap-2 hover:bg-white/10 rounded-lg p-2 transition-colors"

@@ -2,17 +2,7 @@ from diffusers import StableDiffusionPipeline
 import torch
 import os
 import gc
-
-# Map to your saved model paths (update these as needed)
-MODEL_SAVE_DIRS = {
-    "dreamshaper": os.path.join(os.path.dirname(__file__), "models", "dreamshaper_model", "dreamshaper_model"),
-    "realistic_vision": os.path.join(os.path.dirname(__file__), "models", "realistic_vision_model", "realistic_vision_model")
-}
-
-MODEL_PATHS = {
-    "dreamshaper": MODEL_SAVE_DIRS["dreamshaper"],
-    "realistic_vision": MODEL_SAVE_DIRS["realistic_vision"]
-}
+from config import MODEL_PATHS
 
 def load_model(selected_style):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -36,14 +26,13 @@ def load_model(selected_style):
     
     pipe = pipe.to(device)
     
-    # Enable memory optimizations
+    # Enable memory optimizations (use only compatible ones)
     pipe.enable_attention_slicing()
-    pipe.enable_model_cpu_offload()
     
     # Additional optimizations for lower memory usage
     if device == "cuda":
         pipe.enable_vae_slicing()  # Slice VAE for lower memory usage
-        pipe.enable_sequential_cpu_offload()  # Sequential CPU offload
+        # Don't use CPU offload as it causes meta tensor issues
     
     print(f"✅ {selected_style.upper()} model loaded successfully!")
     if device == "cuda":
